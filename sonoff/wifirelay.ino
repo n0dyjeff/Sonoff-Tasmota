@@ -44,7 +44,7 @@ enum emul_t  {EMUL_NONE, EMUL_WEMO, EMUL_HUE, EMUL_MAX};
  * No user configurable items below
 \*********************************************************************************************/
 
-#define MODULE                 SONOFF_BASIC // [Module] Select default model
+#define MODULE                 WIFI_RELAY  // [Module] Select default model
 
 #define USE_DHT                             // Default DHT11 sensor needs no external library
 #ifndef USE_DS18x20

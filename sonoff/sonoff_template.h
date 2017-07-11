@@ -124,6 +124,7 @@ enum fpins_t {
 
 // Supported hardware modules
 enum module_t {
+  WIFI_RELAY,
   SONOFF_BASIC,
   SONOFF_RF,
   SONOFF_SV,
@@ -162,6 +163,26 @@ typedef struct MYTMPLT {
 
 // Default module settings
 const mytmplt modules[MAXMODULE] PROGMEM = {
+  { "Wifi Relay",      // Wifi Relay (ESP8266)
+     GPIO_KEY1,        // GPIO00 PROG Button
+     GPIO_USER,        // GPIO01 Serial RXD or Optional sensor on J2 RXD (if not using serial io)
+     0,                // GPIO02 
+     GPIO_USER,        // GPIO03 Serial TXD or Optional sensor on J2 TXD (if not using serial io)
+     GPIO_REL2_INV,    // GPIO04 Relay 2 (active low)
+     GPIO_REL1_INV,    // GPIO05 Relay 1 (active low)
+     0,                // GPIO06 (SD_CLK   Flash)
+     0,                // GPIO07 (SD_DATA0 Flash QIO/DIO/DOUT)
+     0,                // GPIO08 (SD_DATA1 Flash QIO/DIO)
+     0,                // GPIO09 (SD_DATA2 Flash QIO)
+     0,                // GPIO10 (SD_DATA3 Flash QIO)
+     0,                // GPIO11 (SD_CMD   Flash)
+     0,                // GPIO12 UNUSED
+     0,                // GPIO13 UNUSED
+     0,                // GPIO14 UNUSED
+     0,                // GPIO15 UNUSED
+     0,                // GPIO16 UNUSED
+     0                 // ADC0 Analog input
+  },
   { "Sonoff Basic",    // Sonoff Basic (ESP8266)
      GPIO_KEY1,        // GPIO00 Button
      GPIO_USER,        // GPIO01 Serial RXD and Optional sensor
