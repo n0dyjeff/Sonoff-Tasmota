@@ -20,11 +20,12 @@
   Prerequisites:
     - Change libraries/PubSubClient/src/PubSubClient.h
         #define MQTT_MAX_PACKET_SIZE 512
- 
-    - Select IDE Tools - Flash size: "1M (no SPIFFS)"
+
+    - Select IDE Tools - Flash Mode: "DOUT"
+    - Select IDE Tools - Flash Size: "1M (no SPIFFS)"
   ====================================================*/
 
-#define VERSION                0x05020300  // 5.2.3
+#define VERSION                0x05030000  // 5.3.0
 
 enum log_t   {LOG_LEVEL_NONE, LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_DEBUG, LOG_LEVEL_DEBUG_MORE, LOG_LEVEL_ALL};
 enum week_t  {Last, First, Second, Third, Fourth};
@@ -122,7 +123,8 @@ enum emul_t  {EMUL_NONE, EMUL_WEMO, EMUL_HUE, EMUL_MAX};
 
 #define PWM_RANGE              1023         // 255..1023 needs to be devisible by 256
 //#define PWM_FREQ               1000         // 100..1000 Hz led refresh
-#define PWM_FREQ               910          // 100..1000 Hz led refresh (iTead value)
+//#define PWM_FREQ               910          // 100..1000 Hz led refresh (iTead value)
+#define PWM_FREQ               880          // 100..1000 Hz led refresh (BN-SZ01 value)
 
 #define MAX_POWER_HOLD         10           // Time in SECONDS to allow max agreed power (Pow)
 #define MAX_POWER_WINDOW       30           // Time in SECONDS to disable allow max agreed power (Pow)
@@ -135,7 +137,7 @@ enum emul_t  {EMUL_NONE, EMUL_WEMO, EMUL_HUE, EMUL_MAX};
 #define SERIALLOG_TIMER        600          // Seconds to disable SerialLog
 #define OTA_ATTEMPTS           10           // Number of times to try fetching the new firmware
 
-#define INPUT_BUFFER_SIZE      100          // Max number of characters in serial buffer
+#define INPUT_BUFFER_SIZE      250          // Max number of characters in (serial) command buffer
 #define CMDSZ                  20           // Max number of characters in command
 #define TOPSZ                  100          // Max number of characters in topic string
 #define LOGSZ                  128          // Max number of characters in log string
@@ -144,6 +146,8 @@ enum emul_t  {EMUL_NONE, EMUL_WEMO, EMUL_HUE, EMUL_MAX};
 #else
   #define MAX_LOG_LINES        20           // Max number of lines in weblog
 #endif
+#define MAX_BACKLOG            16           // Max number of commands in backlog (chk blogidx and blogptr code)
+#define MIN_BACKLOG_DELAY      2            // Minimal backlog delay in 0.1 seconds
 
 #define APP_BAUDRATE           115200       // Default serial baudrate
 #define MAX_STATUS             11           // Max number of status lines
@@ -178,7 +182,7 @@ enum opt_t   {P_HOLD_TIME, P_MAX_POWER_RETRY, P_MAX_PARAM8};   // Index in sysCf
 #ifdef USE_I2C
   #include <Wire.h>                         // I2C support library
 #endif  // USE_I2C
-#ifdef USI_SPI
+#ifdef USE_SPI
   #include <SPI.h>                          // SPI support, TFT
 #endif  // USE_SPI
 #include "settings.h"
@@ -256,6 +260,11 @@ uint8_t blink_powersave;              // Blink start power save state
 uint16_t mqtt_cmnd_publish = 0;       // ignore flag for publish command
 uint8_t latching_power = 0;           // Power state at latching start
 uint8_t latching_relay_pulse = 0;     // Latching relay pulse timer
+String Backlog[MAX_BACKLOG];          // Command backlog
+uint8_t blogidx = 0;                  // Command backlog index
+uint8_t blogptr = 0;                  // Command backlog pointer
+uint8_t blogmutex = 0;                // Command backlog pending
+uint16_t blogdelay = 0;               // Command backlog delay
 
 #ifdef USE_MQTT_TLS
   WiFiClientSecure espClient;         // Wifi Secure Client
@@ -294,6 +303,7 @@ uint8_t hlw_flg = 0;                  // Power monitor configured
 uint8_t i2c_flg = 0;                  // I2C configured
 uint8_t spi_flg = 0;                  // SPI configured
 uint8_t pwm_flg = 0;                  // PWM configured
+uint8_t sfl_flg = 0;                  // Sonoff Led flag (0 = No led, 1 = BN-SZ01, 2 = Sonoff Led)
 uint8_t pwm_idxoffset = 0;            // Allowed PWM command offset (change for Sonoff Led)
 
 boolean mDNSbegun = false;
@@ -400,7 +410,7 @@ void setRelay(uint8_t rpower)
     Serial.write('\n');
     Serial.flush();
   }
-  else if (SONOFF_LED == sysCfg.module) {
+  else if (sfl_flg) {
     sl_setPower(rpower &1);
   }
   else if (EXS_RELAY == sysCfg.module) {
@@ -934,6 +944,7 @@ void mqttDataCb(char* topic, byte* data, unsigned int data_len)
       payload = (int16_t) lnum;          // -32766 - 32767
       payload16 = (uint16_t) lnum;       // 0 - 65535
     }
+    blogdelay = MIN_BACKLOG_DELAY;       // Reset backlog delay
 
     if (!strcmp_P(dataBufUc,PSTR("OFF")) || !strcmp_P(dataBufUc,PSTR("FALSE")) || !strcmp_P(dataBufUc,PSTR("STOP")) || !strcmp_P(dataBufUc,PSTR("CELSIUS"))) {
       payload = 0;
@@ -954,7 +965,34 @@ void mqttDataCb(char* topic, byte* data, unsigned int data_len)
 //    snprintf_P(svalue, sizeof(svalue), PSTR("RSLT: Payload %d, Payload16 %d"), payload, payload16);
 //    addLog(LOG_LEVEL_DEBUG, svalue);
 
-    if (!strcmp_P(type,PSTR("POWER")) && (index > 0) && (index <= Maxdevice)) {
+    if (!strcmp_P(type,PSTR("BACKLOG"))) {
+      if (data_len) {
+        char *blcommand = strtok(dataBuf, ";");
+        while (blcommand != NULL) {
+          Backlog[blogidx] = String(blcommand);
+          blogidx++;
+/*
+          if (blogidx >= MAX_BACKLOG) {
+            blogidx = 0;
+          }
+*/
+          blogidx &= 0xF;
+          blcommand = strtok(NULL, ";");
+        }
+        snprintf_P(svalue, sizeof(svalue), PSTR("{\"Backlog\":\"Appended\"}"));
+      } else {
+        uint8_t blflag = (blogptr == blogidx);
+        blogptr = blogidx;
+        snprintf_P(svalue, sizeof(svalue), PSTR("{\"Backlog\":\"%s\"}"), blflag ? "Empty" : "Aborted");
+      }
+    }
+    else if (!strcmp_P(type,PSTR("DELAY"))) {
+      if ((payload >= MIN_BACKLOG_DELAY) && (payload <= 3600)) {
+        blogdelay = payload;
+      }
+      snprintf_P(svalue, sizeof(svalue), PSTR("{\"Delay\":%d}"), blogdelay);
+    }
+    else if (!strcmp_P(type,PSTR("POWER")) && (index > 0) && (index <= Maxdevice)) {
       if ((payload < 0) || (payload > 4)) {
         payload = 9;
       }
@@ -1006,7 +1044,7 @@ void mqttDataCb(char* topic, byte* data, unsigned int data_len)
       }
       snprintf_P(svalue, sizeof(svalue), PSTR("{\"BlinkCount\":%d}"), sysCfg.blinkcount);
     }
-    else if ((SONOFF_LED == sysCfg.module) && sl_command(type, index, dataBufUc, data_len, payload, svalue, sizeof(svalue))) {
+    else if (sfl_flg && sl_command(type, index, dataBufUc, data_len, payload, svalue, sizeof(svalue))) {
       // Serviced
     }
     else if (!strcmp_P(type,PSTR("SAVEDATA"))) {
@@ -1146,7 +1184,6 @@ void mqttDataCb(char* topic, byte* data, unsigned int data_len)
           for (byte i = 0; i < MAX_GPIO_PIN; i++) {
             sysCfg.my_module.gp.io[i] = 0;
           }
-          setModuleFlashMode(0);
         }
         restartflag = 2;
       }
@@ -1644,12 +1681,19 @@ void do_cmnd_power(byte device, byte state)
 {
 // device  = Relay number 1 and up
 // state 0 = Relay Off
-// state 1 = Relay on (turn off after sysCfg.pulsetime * 100 mSec if enabled)
+// state 1 = Relay On (turn off after sysCfg.pulsetime * 100 mSec if enabled)
 // state 2 = Toggle relay
 // state 3 = Blink relay
 // state 4 = Stop blinking relay
+// state 6 = Relay Off and no publishPowerState
+// state 7 = Relay On and no publishPowerState
 // state 9 = Show power state
 
+  uint8_t publishPower = 1;
+  if ((6 == state) || (7 == state)) {
+    state &= 1;
+    publishPower = 0;
+  }
   if ((device < 1) || (device > Maxdevice)) {
     device = 1;
   }
@@ -1696,7 +1740,9 @@ void do_cmnd_power(byte device, byte state)
     }
     return;
   }
-  mqtt_publishPowerState(device);
+  if (publishPower) {
+    mqtt_publishPowerState(device);
+  }
 }
 
 void stop_all_power_blink()
@@ -1716,7 +1762,7 @@ void stop_all_power_blink()
 void do_cmnd(char *cmnd)
 {
   char stopic[CMDSZ];
-  char svalue[128];
+  char svalue[INPUT_BUFFER_SIZE];
   char *start;
   char *token;
 
@@ -2043,7 +2089,7 @@ void stateloop()
   if (mqtt_cmnd_publish) {
     mqtt_cmnd_publish--;  // Clean up
   }
-
+  
   if (latching_relay_pulse) {
     latching_relay_pulse--;
     if (!latching_relay_pulse) {
@@ -2074,7 +2120,7 @@ void stateloop()
     }
   }
 
-  if (SONOFF_LED == sysCfg.module) {
+  if (sfl_flg) {  // Sonoff BN-SZ01 or Sonoff Led
     sl_animate();
   }
   
@@ -2272,9 +2318,25 @@ void stateloop()
     }
   }
 
+  if (blogdelay) {
+    blogdelay--;
+  }
+  if ((blogptr != blogidx) && !blogdelay && !blogmutex) {
+    blogmutex = 1;
+    do_cmnd((char*)Backlog[blogptr].c_str());
+    blogmutex = 0;
+    blogptr++;
+/*
+    if (blogptr >= MAX_BACKLOG) {
+      blogptr = 0;
+    }
+*/
+    blogptr &= 0xF;
+  }
+
   switch (state) {
   case (STATES/10)*2:
-    if (otaflag) {
+    if (otaflag && (blogptr == blogidx)) {
       otaflag--;
       if (2 == otaflag) {
         otaretry = OTA_ATTEMPTS;
@@ -2302,7 +2364,7 @@ void stateloop()
       if (90 == otaflag) {  // Allow MQTT to reconnect
         otaflag = 0;
         if (otaok) {
-          setModuleFlashMode(1);  // QIO - ESP8266, DOUT - ESP8285 (Sonoff 4CH and Touch)
+          setFlashMode(1, 3);  // DOUT for both ESP8266 and ESP8285
           snprintf_P(svalue, sizeof(svalue), PSTR("Successful. Restarting"));
         } else {
           snprintf_P(svalue, sizeof(svalue), PSTR("Failed %s"), ESPhttpUpdate.getLastErrorString().c_str());
@@ -2316,7 +2378,7 @@ void stateloop()
     if (rtc_midnight_now()) {
       counter_savestate();
     }
-    if (savedatacounter) {
+    if (savedatacounter && (blogptr == blogidx)) {
       savedatacounter--;
       if (savedatacounter <= 0) {
         if (sysCfg.flag.savestate) {
@@ -2334,7 +2396,7 @@ void stateloop()
         savedatacounter = sysCfg.savedata;
       }
     }
-    if (restartflag) {
+    if (restartflag && (blogptr == blogidx)) {
       if (211 == restartflag) {
         CFG_Default();
         restartflag = 2;
@@ -2457,6 +2519,7 @@ void GPIO_init()
   }
 
   memcpy_P(&def_module, &modules[sysCfg.module], sizeof(def_module));
+//  sysCfg.my_module.flag = def_module.flag;
   strlcpy(my_module.name, def_module.name, sizeof(my_module.name));
   for (byte i = 0; i < MAX_GPIO_PIN; i++) {
     if (sysCfg.my_module.gp.io[i] > GPIO_NONE) {
@@ -2521,22 +2584,11 @@ void GPIO_init()
     Maxdevice = 0;
     Baudrate = 19200;
   }
+  else if (SONOFF_BN == sysCfg.module) {
+    sfl_flg = 1;
+  }
   else if (SONOFF_LED == sysCfg.module) {
-    pwm_idxoffset = 2;
-    pin[GPIO_WS2812] = 99;  // I do not allow both Sonoff Led AND WS2812 led
-    if (!my_module.gp.io[4]) {
-      pinMode(4, OUTPUT);    // Stop floating outputs
-      digitalWrite(4, LOW);
-    }
-    if (!my_module.gp.io[5]) {
-      pinMode(5, OUTPUT);    // Stop floating outputs
-      digitalWrite(5, LOW);
-    }
-    if (!my_module.gp.io[14]) {
-      pinMode(14, OUTPUT);  // Stop floating outputs
-      digitalWrite(14, LOW);
-    }
-    sl_init();
+    sfl_flg = 2;
   }
   else {
     Maxdevice = 0;
@@ -2560,6 +2612,24 @@ void GPIO_init()
       pinMode(pin[GPIO_SWT1 +i], INPUT_PULLUP);
       lastwallswitch[i] = digitalRead(pin[GPIO_SWT1 +i]);  // set global now so doesn't change the saved power state on first switch check
     }
+  }
+  
+  if (sfl_flg) {              // Sonoff Led or BN-SZ01
+    pwm_idxoffset = sfl_flg;  // 1 for BN-SZ01, 2 for Sonoff Led
+    pin[GPIO_WS2812] = 99;    // I do not allow both Sonoff Led AND WS2812 led
+    if (!my_module.gp.io[4]) {
+      pinMode(4, OUTPUT);     // Stop floating outputs
+      digitalWrite(4, LOW);
+    }
+    if (!my_module.gp.io[5]) {
+      pinMode(5, OUTPUT);     // Stop floating outputs
+      digitalWrite(5, LOW);
+    }
+    if (!my_module.gp.io[14]) {
+      pinMode(14, OUTPUT);    // Stop floating outputs
+      digitalWrite(14, LOW);
+    }
+    sl_init();
   }
   for (byte i = pwm_idxoffset; i < 5; i++) {
     if (pin[GPIO_PWM1 +i] < 99) {

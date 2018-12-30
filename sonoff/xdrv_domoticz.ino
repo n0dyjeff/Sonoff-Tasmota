@@ -51,12 +51,11 @@ void mqtt_publishDomoticzPowerState(byte device)
 {
   char svalue[64];  // was MESSZ
 
-  if (sysCfg.domoticz_relay_idx[device -1]) {
+  if (sysCfg.flag.mqtt_enabled && sysCfg.domoticz_relay_idx[device -1]) {
     if ((device < 1) || (device > Maxdevice)) {
       device = 1;
     }
-
-    if (SONOFF_LED == sysCfg.module) {
+    if (sfl_flg) {
       snprintf_P(svalue, sizeof(svalue), PSTR("{\"idx\":%d,\"nvalue\":2,\"svalue\":\"%d\"}"),
         sysCfg.domoticz_relay_idx[device -1], sysCfg.led_dimmer[device -1]);
       mqtt_publish(domoticz_in_topic, svalue);
@@ -74,10 +73,10 @@ void mqtt_publishDomoticzPowerState(byte device)
 
 void domoticz_updatePowerState(byte device)
 {
-   if (domoticz_update_flag) {
+  if (domoticz_update_flag) {
     mqtt_publishDomoticzPowerState(device);
-   }
-   domoticz_update_flag = 1;
+  }
+  domoticz_update_flag = 1;
 }
 
 void domoticz_mqttUpdate()
@@ -172,7 +171,7 @@ boolean domoticz_mqttData(char *topicBuf, uint16_t stopicBuf, char *dataBuf, uin
             if ((pin[GPIO_WS2812] < 99) && (sysCfg.ws_dimmer == nvalue)) {
               return 1;
             }
-            if ((SONOFF_LED == sysCfg.module) && (sysCfg.led_dimmer[i] == nvalue)) {
+            if (sfl_flg && (sysCfg.led_dimmer[i] == nvalue)) {
               return 1;
             }
             snprintf_P(topicBuf, stopicBuf, PSTR("/DIMMER%s"), (Maxdevice > 1) ? stemp1 : "");
